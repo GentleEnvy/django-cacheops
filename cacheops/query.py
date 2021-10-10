@@ -22,7 +22,8 @@ except ImportError:
     MAX_GET_RESULTS = None
 
 from .conf import model_profile, settings, ALL_OPS
-from .utils import monkey_mix, stamp_fields, get_cache_key, cached_view_fab, family_has_profile
+from .utils import monkey_mix, stamp_fields, get_cache_key, cached_view_fab, \
+    family_has_profile, get_related_classes
 from .utils import md5
 from .sharding import get_prefix
 from .redis import redis_client, handle_connection_failure, load_script
@@ -433,6 +434,16 @@ class ManagerMixin(object):
                 # TODO: do not fetch non-serializable fields
                 _old_objs.__dict__[sender, instance.pk] \
                     = sender.objects.using(using).get(pk=instance.pk)
+
+                # Get all concrete parent and child classes, and mark those for invalidation too
+                related_types = (get_related_classes(sender, parent_classes=True) +
+                                 get_related_classes(sender, parent_classes=False))
+                for related_type in related_types:
+                    try:
+                        related_object = related_type.objects.get(pk=instance.pk)
+                        _old_objs.__dict__[related_type, instance.pk] = related_object
+                    except related_type.DoesNotExist:
+                        pass
             except sender.DoesNotExist:
                 pass
 
@@ -443,8 +454,19 @@ class ManagerMixin(object):
         if old:
             invalidate_obj(old, using=using)
         invalidate_obj(instance, using=using)
-
         invalidate_o2o(sender, old, instance, using=using)
+
+        related_types = (get_related_classes(sender, parent_classes=True) +
+                         get_related_classes(sender, parent_classes=False))
+        for related_type in related_types:
+            related_old = _old_objs.__dict__.pop((related_type, instance.pk), None)
+            if related_old:
+                invalidate_obj(related_old)
+            try:
+                related_instance = related_type.objects.get(pk=instance.pk)
+                invalidate_obj(related_instance)
+            except related_type.DoesNotExist:
+                pass
 
         # We run invalidations but skip caching if we are dirty
         if transaction_states[using].is_dirty():
